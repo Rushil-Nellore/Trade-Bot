@@ -37,7 +37,6 @@ def get_price_data(symbol="BTCUSDT", interval="1h", days=365):
     df["MA_10"] = df["close"].rolling(window=10).mean()
     df["MA_30"] = df["close"].rolling(window=30).mean()
     df["MA_200"] = df["close"].rolling(window=200).mean()
-
     # RSI calculation
     delta = df["close"].diff()
     gain = delta.clip(lower=0)
@@ -69,10 +68,17 @@ def simulate(df, balance=10000, trailing_stop_pct=0.03):
             rsi = df["RSI"].iloc[i]
             if pd.isna(rsi) or rsi > 70:
                 continue  # overbought, skip
+            # price must be higher than it was 5 hours ago
             if prev_ma10 <= prev_ma30 and ma10 > ma30:
-                ma200 = df["MA_200"].iloc[i]
-                if pd.isna(ma200) or price < ma200:
-                    continue  # skip — downtrend, don't buy
+                ma200_now  = df["MA_200"].iloc[i]
+                ma200_prev = df["MA_200"].iloc[i - 10]  # 10 hours ago
+                
+                if pd.isna(ma200_now) or pd.isna(ma200_prev):
+                    continue
+                if price < ma200_now:
+                    continue  # price below MA200
+                if ma200_now < ma200_prev:
+                    continue  # MA200 itself is declining = downtrend
                 in_trade = True
                 buy_price = price
                 peak_price = price
