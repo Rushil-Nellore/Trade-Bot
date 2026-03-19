@@ -52,6 +52,8 @@ def simulate(df, balance=10000, trailing_stop_pct=0.03):
     buy_price = 0
     peak_price = 0
     trades = []
+    peak_balance= balance
+    max_drawdown=0
 
     for i in range(1, len(df)):
         price = df["close"].iloc[i]
@@ -91,16 +93,22 @@ def simulate(df, balance=10000, trailing_stop_pct=0.03):
 
         
             if price < buy_price * 0.96:  # 4% stop loss
-                profit = price - buy_price
+                fee=price*0.001 #0.1% of trade value
+                profit=(price - buy_price) - fee
                 balance += profit
+                peak_balance = max(peak_balance, balance)
+                max_drawdown = max(max_drawdown, (peak_balance - balance) / peak_balance)
                 trades.append(profit)
                 in_trade = False
                 print(f"STOP at ${price:,.2f} | loss: ${profit:,.2f} | balance: ${balance:,.2f}")
                 continue
 
             if drop_from_peak >= trailing_stop_pct:
-                profit = price - buy_price
+                fee=price*0.001 #0.1% of trade value
+                profit=(price - buy_price) - fee
                 balance += profit
+                peak_balance = max(peak_balance, balance)
+                max_drawdown = max(max_drawdown, (peak_balance - balance) / peak_balance)
                 trades.append(profit)
                 in_trade = False
                 print(f"SELL at ${price:,.2f} | profit: ${profit:,.2f} | balance: ${balance:,.2f}")
@@ -108,6 +116,7 @@ def simulate(df, balance=10000, trailing_stop_pct=0.03):
     print(f"\n--- SUMMARY ---")
     print(f"Total trades : {len(trades)}")
     print(f"Profitable   : {sum(1 for t in trades if t > 0)}")
+    print(f"Max drawdown : {max_drawdown:.1%}")
     print(f"Final balance: ${balance:,.2f}")
     return balance
 
