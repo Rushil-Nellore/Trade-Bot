@@ -22,6 +22,8 @@ def get_price_data(symbol="BTCUSDT", interval="1h", limit=100):
     df = df[["timestamp", "open", "high", "low", "close", "volume"]]
     df["close"] = pd.to_numeric(df["close"])
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+    df["MA_10"] = df["close"].rolling(window=10).mean()
+    df["MA_30"] = df["close"].rolling(window=30).mean()
 
     return df
 
