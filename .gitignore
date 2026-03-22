@@ -3,3 +3,5 @@ env/
 .tmp/
 __pycache__/
 *.pyc
+trade_log.csv
+ml_report.csv

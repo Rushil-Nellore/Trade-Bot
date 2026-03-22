@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from quant_bot.config import DASHBOARD_PATH, INITIAL_BALANCE, TRADE_LOG_PATH
+from quant_bot.ml import MLExperimentResult
 from quant_bot.models import SimulationResult
 
 
@@ -10,6 +11,21 @@ def save_trade_log(result: SimulationResult, path: str = TRADE_LOG_PATH) -> None
     trade_log_df = pd.DataFrame(result.trade_log)
     trade_log_df.to_csv(path, index=False)
     print(f"Trade log saved as {path}")
+
+
+def save_ml_report(result: MLExperimentResult, path: str) -> None:
+    metric_rows = pd.DataFrame(
+        [{"section": "metrics", "name": key, "value": value} for key, value in result.metrics.items()]
+    )
+    feature_rows = result.feature_importance.copy()
+    feature_rows["section"] = "feature_importance"
+    feature_rows = feature_rows.rename(columns={"feature": "name", "weight": "value"})
+    report = pd.concat(
+        [metric_rows, feature_rows[["section", "name", "value"]]],
+        ignore_index=True,
+    )
+    report.to_csv(path, index=False)
+    print(f"ML report saved as {path}")
 
 
 def plot(df: pd.DataFrame, result: SimulationResult, path: str = DASHBOARD_PATH) -> None:
@@ -89,4 +105,3 @@ def plot(df: pd.DataFrame, result: SimulationResult, path: str = DASHBOARD_PATH)
     plt.savefig(path, dpi=150, bbox_inches="tight", facecolor="#0f0f0f")
     print(f"\nChart saved as {path}")
     plt.show()
-

@@ -1,19 +1,24 @@
-from quant_bot.backtest import simulate
-from quant_bot.config import DEFAULT_DAYS, DEFAULT_INTERVAL, DEFAULT_SYMBOL, INITIAL_BALANCE, TRAILING_STOP_PCT
-from quant_bot.data import get_price_data
-from quant_bot.reporting import plot, save_trade_log
+from quant_bot.config import DEFAULT_DAYS, DEFAULT_INTERVAL, DEFAULT_ML_HORIZON, DEFAULT_SYMBOL
+from quant_bot.pipeline import run_full_pipeline
 
 
 def main() -> None:
-    df = get_price_data(symbol=DEFAULT_SYMBOL, interval=DEFAULT_INTERVAL, days=DEFAULT_DAYS)
+    df, result, ml_result = run_full_pipeline(
+        symbol=DEFAULT_SYMBOL,
+        interval=DEFAULT_INTERVAL,
+        days=DEFAULT_DAYS,
+        ml_horizon=DEFAULT_ML_HORIZON,
+    )
     print(
         f"Fetched {len(df)} candles from {df['timestamp'].iloc[0]} to {df['timestamp'].iloc[-1]}"
     )
-    result = simulate(df, initial_balance=INITIAL_BALANCE, trailing_stop_pct=TRAILING_STOP_PCT)
-    save_trade_log(result)
-    plot(df, result)
+    print(f"Final balance: ${result.final_balance:,.2f}")
+    print(
+        "ML experiment accuracy: "
+        f"{ml_result.metrics['accuracy']:.1%} "
+        f"(baseline {ml_result.metrics['baseline_accuracy']:.1%})"
+    )
 
 
 if __name__ == "__main__":
     main()
-
