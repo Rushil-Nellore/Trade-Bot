@@ -1,0 +1,2 @@
+"""BTC quant bot package."""
+
