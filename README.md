@@ -1,53 +1,72 @@
 # BTC Quant Trading Bot
 
-A Python-based algorithmic trading bot for Bitcoin using technical analysis.
+A Python backtesting project for a Bitcoin trend-following strategy using Binance hourly candles and a simple technical-analysis ruleset.
 
-## Strategy
-- **Entry:** MA10/MA30 crossover with MA200 trend filter + RSI < 70
-- **Exit:** 5% trailing stop or 4% hard stop loss
-- **Fees:** 0.1% per trade (Binance standard)
+## What It Does
+- Downloads historical `BTCUSDT` candle data from Binance.
+- Calculates `MA_10`, `MA_30`, `MA_200`, and `RSI(14)`.
+- Simulates a long-only strategy with trading fees, a hard stop, and a trailing stop.
+- Saves a performance chart to `dashboard.png`.
+- Saves every closed trade to `trade_log.csv`.
 
-## Results (Mar 2025 - Mar 2026)
-- Starting balance: $10,000
-- Final balance: $34,817
-- Total trades: 13
-- Win rate: 54%
-- Max drawdown: 22.8%
+## Strategy Rules
+- Entry: `MA_10` crosses above `MA_30`.
+- Trend filter: price must be above `MA_200`, and `MA_200` must be rising.
+- RSI filter: only enter when `RSI < 70`.
+- Exit 1: 4% hard stop below entry.
+- Exit 2: 5% trailing stop from the post-entry peak.
+- Fees: 0.1% at entry and 0.1% at exit.
+
+## Important Note On Results
+This project is a prototype backtester, not a production trading system.
+
+- Results will change depending on when you run the script because it pulls recent market data.
+- Past results are not enough to validate a strategy.
+- There are currently no automated tests for the backtest engine.
+- The code is useful for learning and experimentation, but it should not be treated as investment advice.
 
 ## Setup
-pip install requests pandas matplotlib
+```bash
+pip install -r requirements.txt
 python bot.py
+```
 
-## Indicators Used
-- MA10 / MA30 — momentum crossover signal
-- MA200 — long term trend filter
-- RSI (14) — overbought filter
+## Project Structure
+- `bot.py`: thin entry point for running the backtest.
+- `quant_bot/data.py`: market-data loading and indicator calculation.
+- `quant_bot/backtest.py`: trading rules and portfolio simulation.
+- `quant_bot/reporting.py`: chart export and trade log export.
+- `tests/test_strategy.py`: first regression test for core exit logic.
 
-## Future Improvements
+## Outputs
+- `dashboard.png`: price, signals, equity curve, and RSI chart.
+- `trade_log.csv`: one row per closed trade with entry, exit, reason, size, and PnL.
 
-### 1. ML-Based Signal Generation
-Replace rule-based MA crossover signals with a trained ML model:
-- Use LSTM (Long Short-Term Memory) neural network to predict price direction
-- Features: MA10, MA30, MA200, RSI, volume, price momentum
-- Label: 1 (price up next 10 hours), 0 (price down)
-- This directly connects to Andrew Ng's ML Specialization coursework
+## Project Quality Today
+What is already good:
+- Clear strategy logic.
+- Real market data input.
+- Visual output that makes the backtest easy to inspect.
+- Trade logging for basic auditability.
 
-### 2. Multi-Asset Trading
-- Run the bot on ETH, SOL, BNB simultaneously
-- Allocate capital across assets based on signal strength
+What is still missing:
+- Automated tests for indicators and order execution.
+- Reproducible benchmark results checked into the repo.
+- Walk-forward and out-of-sample evaluation.
 
-### 3. Position Sizing
-- Risk only 1-2% of portfolio per trade instead of going all-in
-- Kelly Criterion for optimal bet sizing
+## Next Improvements
+### 1. Test Coverage
+- Add unit tests for RSI, moving averages, entry logic, and stop logic.
+- Add a small fixture dataset with known expected trades.
 
-### 4. Walk-Forward Testing
-- Test on 2022-2023 bear market data
-- Validate strategy isn't overfitted to 2025-2026
+### 2. Better Research Workflow
+- Save raw candle data locally for reproducible runs.
+- Add CLI parameters for symbol, timeframe, and date range.
 
-### 5. Live Paper Trading
-- Connect to Binance Testnet (fake money, real market conditions)
-- Run bot 24/7 on a Raspberry Pi or cloud server (AWS/GCP free tier)
+### 3. Better Risk Management
+- Risk a fixed fraction of capital per trade instead of always going all-in.
+- Add slippage assumptions and position sizing rules.
 
-### 6. Telegram Alerts
-- Send a Telegram message every time the bot buys or sells
-- Monitor it from your phone in real time
+### 4. Stronger Validation
+- Run the strategy across multiple market regimes.
+- Compare against buy-and-hold and simpler baseline strategies.
