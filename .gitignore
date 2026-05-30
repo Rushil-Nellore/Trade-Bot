@@ -1,6 +1,5 @@
 env/
 .venv/
-.tmp/
 __pycache__/
 *.pyc
 trade_log.csv
