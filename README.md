@@ -4,12 +4,6 @@ A portfolio-ready Python project that combines quantitative backtesting, a first
 
 ![BTC dashboard preview](dashboard.png)
 
-## Why This Project Is Strong For Internships
-- It shows end-to-end engineering, not just notebook experimentation.
-- It mixes data analysis, trading logic, evaluation, visualization, and project structure.
-- It includes a simple ML workflow that naturally connects to AI/ML coursework.
-- It is organized like a real codebase with modules, tests, outputs, and repeatable commands.
-
 ## Features
 - Binance hourly market-data ingestion for `BTCUSDT`
 - Technical indicators: `MA_10`, `MA_30`, `MA_200`, `RSI(14)`
