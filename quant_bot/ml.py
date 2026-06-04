@@ -16,18 +16,44 @@ logger = logging.getLogger(__name__)  # create a logger named "quant_bot.ml" so 
 
 # Single source of truth for the 7 feature names — used by both training and the live
 # backtest so they can never accidentally use different feature sets.
-FEATURE_COLUMNS: list[str] = [  # list of the 11 input feature names the model is trained on (expanded from 7 to 11 for better predictive power)
-    "return_1",       # 1-candle price return (how much price moved in the last 1 hour)
-    "return_6",       # 6-candle price return
-    "return_24",      # 24-candle price return (roughly one day's momentum)
-    "ma_gap_short",   # gap between MA10 and MA30 relative to price — measures short-term momentum
-    "ma_gap_trend",   # distance of price above/below MA200 — measures long-term trend position
-    "volume_change",  # percentage change in trading volume vs the previous candle
-    "rsi_scaled",     # RSI divided by 100 — puts RSI on a 0-1 scale matching the other features
-    "macd_hist_pct",  # NEW: MACD - MACD_signal as a fraction of price — captures momentum divergence
-    "bb_position",    # NEW: where price sits within the Bollinger bands (0 = at lower band, 1 = at upper band)
-    "atr_pct",        # NEW: ATR divided by price — current volatility as a percentage of price
-    "hour_of_day",    # NEW: hour of the day scaled to 0-1 — captures intraday seasonality (e.g. US market open volatility)
+FEATURE_COLUMNS: list[str] = [  # list of the 29 input feature names the model is trained on (expanded from 11 → 29 to give XGBoost more signal to learn from)
+    # ── Returns at multiple horizons ────────────────────────────────────────
+    "return_1",          # 1-candle (1-hour) percentage return
+    "return_3",          # 3-candle return — short-term momentum
+    "return_6",          # 6-candle return
+    "return_12",         # 12-candle (half-day) return
+    "return_24",         # 24-candle (1-day) return
+    "return_72",         # 72-candle (3-day) return — captures multi-day trends
+    # ── Trend position (multiple MAs) ───────────────────────────────────────
+    "ma_gap_short",      # MA10 vs MA30 — short-term trend
+    "ma_gap_50_100",     # MA50 vs MA100 — medium-term trend
+    "ma_gap_trend",      # price vs MA200 — long-term trend
+    "ma_50_dist",        # price vs MA50 — distance from medium-term anchor
+    "ma_100_dist",       # price vs MA100 — distance from medium-long anchor
+    # ── Momentum oscillators ────────────────────────────────────────────────
+    "rsi_scaled",        # RSI / 100 (0-1 scale)
+    "rsi_change_6",      # change in RSI over the last 6 candles — RSI acceleration
+    "macd_hist_pct",     # MACD histogram (MACD − signal) as fraction of price
+    "price_acceleration",# return_1 − return_6 — is momentum building (positive) or fading (negative)?
+    # ── Volatility ──────────────────────────────────────────────────────────
+    "atr_pct",           # ATR / price — current volatility as % of price
+    "volatility_24",     # std of last 24 hourly returns — choppy vs calm regime detector
+    "bb_position",       # position within Bollinger Bands (0 = lower, 1 = upper)
+    "bb_width_pct",      # band width / price — volatility expansion / squeeze
+    # ── Volume ──────────────────────────────────────────────────────────────
+    "volume_change",     # % change in volume vs previous candle
+    "volume_zscore",     # (vol − vol_mean) / vol_std over last 20 candles — catches volume spikes
+    "volume_ma_ratio",   # vol / 20-period avg vol — relative volume
+    # ── Candle shape / microstructure ───────────────────────────────────────
+    "body_pct",          # |close − open| / (high − low) — how decisive the candle was
+    "upper_wick_pct",    # upper wick size / range — rejection at highs (bearish signal)
+    "lower_wick_pct",    # lower wick size / range — rejection at lows (bullish signal)
+    # ── Time / seasonality ─────────────────────────────────────────────────
+    "hour_of_day",       # hour of day (0-23) / 23 — intraday patterns
+    "day_of_week",       # day of week (0=Mon … 6=Sun) / 6 — weekly patterns
+    # ── Trend persistence / range position ──────────────────────────────────
+    "dist_from_high_20", # (close − rolling 20-period high) / close — distance below recent peak
+    "dist_from_low_20",  # (close − rolling 20-period low) / close — distance above recent trough
 ]
 
 
@@ -52,43 +78,102 @@ def compute_features_at_row(df: pd.DataFrame, i: int) -> dict[str, float] | None
     if i < 24:  # we need 24 rows of history to compute return_24 — return None for any row that doesn't have enough past data
         return None  # None signals to the backtester "skip the ML gate this candle"
 
-    close = df["close"].iloc[i]  # .iloc[i]: integer-location indexing — get the close price at row i
-    close_1 = df["close"].iloc[i - 1]  # close price one candle ago
-    close_6 = df["close"].iloc[i - 6]  # close price six candles ago
-    close_24 = df["close"].iloc[i - 24]  # close price 24 candles ago
-    vol = df["volume"].iloc[i]  # trading volume at the current candle
-    vol_1 = df["volume"].iloc[i - 1]  # trading volume one candle ago
-    ma10 = df["MA_10"].iloc[i]  # 10-period moving average at the current candle
-    ma30 = df["MA_30"].iloc[i]  # 30-period moving average at the current candle
-    ma200 = df["MA_200"].iloc[i]  # 200-period moving average at the current candle
-    rsi = df["RSI"].iloc[i]  # RSI value at the current candle
-    macd = df["MACD"].iloc[i]  # MACD line at the current candle (fast EMA - slow EMA)
-    macd_sig = df["MACD_signal"].iloc[i]  # MACD signal line (9-period EMA of MACD)
-    bb_up = df["BB_upper"].iloc[i]  # upper Bollinger band
-    bb_lo = df["BB_lower"].iloc[i]  # lower Bollinger band
-    atr = df["ATR"].iloc[i]  # Average True Range at the current candle
-    ts = df["timestamp"].iloc[i]  # timestamp at the current candle — used for hour-of-day feature
-
-    if any(pd.isna(v) for v in [close, ma10, ma30, ma200, rsi, macd, macd_sig, bb_up, bb_lo, atr]):  # check all values including new indicators — any NaN means we can't predict yet
-        return None  # bail out early rather than propagating NaN into the model
-    if close == 0 or close_1 == 0 or close_6 == 0 or close_24 == 0:  # guard against division-by-zero when computing percentage returns — price should never be 0 in real data but we check anyway
-        return None  # return None so the backtester skips this candle's ML gate
-    bb_range = bb_up - bb_lo  # width of the Bollinger band envelope — used as the denominator for bb_position
-    if bb_range == 0:  # if bands have collapsed to a single line (zero volatility), skip — would cause division by zero
+    if i < 72:  # need 72 candles of history for return_72 (the longest lookback feature)
         return None
 
-    return {  # build and return the feature dictionary — all values are pure backward-looking calculations
-        "return_1":     (close - close_1) / close_1,   # (current - past) / past = fractional price change over 1 candle
-        "return_6":     (close - close_6) / close_6,   # fractional price change over 6 candles
-        "return_24":    (close - close_24) / close_24, # fractional price change over 24 candles (approx one day)
-        "ma_gap_short": (ma10 - ma30) / close,         # how far the fast MA is above/below the slow MA, scaled by price; positive = upward momentum
-        "ma_gap_trend": (close - ma200) / close,       # how far price is above/below the long-term average; positive = bullish long-term trend
-        "volume_change": (vol - vol_1) / vol_1 if vol_1 != 0 else 0.0,  # percentage change in volume vs previous candle; guard against zero divisor
-        "rsi_scaled":   rsi / 100.0,                   # divide RSI (0-100) by 100 to put it on the same 0-1 scale as the other features
-        "macd_hist_pct": (macd - macd_sig) / close,    # NEW: MACD histogram (= MACD - signal line) normalised by price — positive = bullish momentum acceleration
-        "bb_position":  (close - bb_lo) / bb_range,    # NEW: position within Bollinger bands; 0 = at lower band (oversold), 1 = at upper band (overbought)
-        "atr_pct":      atr / close,                   # NEW: volatility as a fraction of price — high values = market is moving violently
-        "hour_of_day":  ts.hour / 23.0,                # NEW: hour of day (0–23) scaled to 0-1 — captures recurring intraday patterns like US market open
+    # ── Price snapshots at various lookback offsets ──────────────────────────
+    close    = df["close"].iloc[i]
+    close_1  = df["close"].iloc[i - 1]
+    close_3  = df["close"].iloc[i - 3]
+    close_6  = df["close"].iloc[i - 6]
+    close_12 = df["close"].iloc[i - 12]
+    close_24 = df["close"].iloc[i - 24]
+    close_72 = df["close"].iloc[i - 72]
+
+    # ── OHLCV at the current candle ──────────────────────────────────────────
+    open_  = df["open"].iloc[i]   # trailing _ to avoid shadowing Python's built-in open()
+    high   = df["high"].iloc[i]
+    low    = df["low"].iloc[i]
+    vol    = df["volume"].iloc[i]
+    vol_1  = df["volume"].iloc[i - 1]
+
+    # ── Indicators at the current candle ─────────────────────────────────────
+    ma10   = df["MA_10"].iloc[i]
+    ma30   = df["MA_30"].iloc[i]
+    ma50   = df["MA_50"].iloc[i]
+    ma100  = df["MA_100"].iloc[i]
+    ma200  = df["MA_200"].iloc[i]
+    rsi    = df["RSI"].iloc[i]
+    rsi_6  = df["RSI"].iloc[i - 6]  # RSI 6 candles ago — used to compute rsi_change_6
+    macd     = df["MACD"].iloc[i]
+    macd_sig = df["MACD_signal"].iloc[i]
+    bb_up  = df["BB_upper"].iloc[i]
+    bb_lo  = df["BB_lower"].iloc[i]
+    atr    = df["ATR"].iloc[i]
+    vol_24 = df["VOL_24"].iloc[i]
+    vol_ma = df["VOL_MA_20"].iloc[i]
+    vol_std = df["VOL_STD_20"].iloc[i]
+    high_20 = df["HIGH_20"].iloc[i]
+    low_20  = df["LOW_20"].iloc[i]
+    ts = df["timestamp"].iloc[i]
+
+    # ── NaN guard: bail out if ANY required value is missing ────────────────
+    required = [close, open_, high, low, ma10, ma30, ma50, ma100, ma200, rsi, rsi_6,
+                macd, macd_sig, bb_up, bb_lo, atr, vol_24, vol_ma, vol_std, high_20, low_20]
+    if any(pd.isna(v) for v in required):
+        return None
+    # ── Division-by-zero guards ─────────────────────────────────────────────
+    if close == 0 or close_1 == 0 or close_3 == 0 or close_6 == 0 or close_12 == 0 or close_24 == 0 or close_72 == 0:
+        return None
+    bb_range = bb_up - bb_lo  # Bollinger band width — denominator for bb_position
+    candle_range = high - low  # full candle range — denominator for body / wick percentages
+    if bb_range == 0 or candle_range == 0 or vol_std == 0:  # any of these being zero would cause a division-by-zero
+        return None
+
+    return_1 = (close - close_1) / close_1  # store these two so we can use them below for price_acceleration
+    return_6 = (close - close_6) / close_6
+    body = abs(close - open_)  # candle body size = |close − open|
+    upper_wick = high - max(open_, close)  # upper wick = high minus the higher of open/close
+    lower_wick = min(open_, close) - low  # lower wick = the lower of open/close minus low
+
+    return {
+        # ── Returns at multiple horizons ─────────────────────────────────────
+        "return_1":  return_1,
+        "return_3":  (close - close_3) / close_3,
+        "return_6":  return_6,
+        "return_12": (close - close_12) / close_12,
+        "return_24": (close - close_24) / close_24,
+        "return_72": (close - close_72) / close_72,
+        # ── Trend position ───────────────────────────────────────────────────
+        "ma_gap_short":  (ma10 - ma30) / close,
+        "ma_gap_50_100": (ma50 - ma100) / close,
+        "ma_gap_trend":  (close - ma200) / close,
+        "ma_50_dist":    (close - ma50) / close,
+        "ma_100_dist":   (close - ma100) / close,
+        # ── Momentum ─────────────────────────────────────────────────────────
+        "rsi_scaled":         rsi / 100.0,
+        "rsi_change_6":       (rsi - rsi_6) / 100.0,  # divide by 100 to keep on same scale as rsi_scaled
+        "macd_hist_pct":      (macd - macd_sig) / close,
+        "price_acceleration": return_1 - return_6,    # is momentum strengthening (positive) or weakening (negative)?
+        # ── Volatility ───────────────────────────────────────────────────────
+        "atr_pct":       atr / close,
+        "volatility_24": vol_24,
+        "bb_position":   (close - bb_lo) / bb_range,
+        "bb_width_pct":  bb_range / close,
+        # ── Volume ───────────────────────────────────────────────────────────
+        "volume_change":   (vol - vol_1) / vol_1 if vol_1 != 0 else 0.0,
+        "volume_zscore":   (vol - vol_ma) / vol_std,
+        "volume_ma_ratio": vol / vol_ma if vol_ma != 0 else 1.0,
+        # ── Candle shape ─────────────────────────────────────────────────────
+        "body_pct":       body / candle_range,
+        "upper_wick_pct": upper_wick / candle_range,
+        "lower_wick_pct": lower_wick / candle_range,
+        # ── Time / seasonality ──────────────────────────────────────────────
+        "hour_of_day":  ts.hour / 23.0,
+        "day_of_week":  ts.dayofweek / 6.0,  # .dayofweek: 0=Monday, 6=Sunday; divide by 6 to scale 0-1
+        # ── Trend persistence ───────────────────────────────────────────────
+        "dist_from_high_20": (close - high_20) / close,  # always ≤ 0 (or 0 if at peak) — how far below the recent peak
+        "dist_from_low_20":  (close - low_20) / close,   # always ≥ 0 (or 0 if at trough) — how far above the recent trough
     }
 
 
@@ -107,18 +192,55 @@ class MLExperimentResult:  # container for everything produced by run_ml_experim
 def build_ml_dataset(df: pd.DataFrame, horizon: int = DEFAULT_ML_HORIZON) -> pd.DataFrame:  # turn a raw OHLCV+indicator DataFrame into a supervised ML dataset
     dataset = df.copy()  # copy(): work on an independent copy so we don't modify the original DataFrame
 
-    dataset["return_1"]  = dataset["close"].pct_change(1)   # pct_change(1): (current - previous) / previous for every row — 1-candle percentage return
-    dataset["return_6"]  = dataset["close"].pct_change(6)   # pct_change(6): percentage change vs 6 candles ago
-    dataset["return_24"] = dataset["close"].pct_change(24)  # pct_change(24): percentage change vs 24 candles ago — approx one day
-    dataset["ma_gap_short"] = (dataset["MA_10"] - dataset["MA_30"]) / dataset["close"]  # short-term momentum: gap between fast and slow MA relative to price
-    dataset["ma_gap_trend"] = (dataset["close"] - dataset["MA_200"]) / dataset["close"]  # long-term trend position: how far price sits above/below the 200-period MA
-    dataset["volume_change"] = dataset["volume"].pct_change().replace([np.inf, -np.inf], np.nan)  # volume percentage change; .replace(): swap inf/-inf with NaN — happens when previous volume was 0
-    dataset["rsi_scaled"] = dataset["RSI"] / 100.0  # scale RSI from 0-100 down to 0-1 to match the other features
-    dataset["macd_hist_pct"] = (dataset["MACD"] - dataset["MACD_signal"]) / dataset["close"]  # NEW: MACD histogram divided by price — captures momentum acceleration
-    bb_range = dataset["BB_upper"] - dataset["BB_lower"]  # band width — denominator for bb_position
-    dataset["bb_position"] = (dataset["close"] - dataset["BB_lower"]) / bb_range.replace(0, np.nan)  # NEW: where price is within bands; .replace(0, nan): avoid division by zero if bands collapse
-    dataset["atr_pct"] = dataset["ATR"] / dataset["close"]  # NEW: volatility as a fraction of price
-    dataset["hour_of_day"] = dataset["timestamp"].dt.hour / 23.0  # NEW: .dt.hour: extract hour from datetime column (0-23); /23.0: scale to 0-1
+    # ── Returns at multiple horizons ─────────────────────────────────────────
+    dataset["return_1"]  = dataset["close"].pct_change(1)   # pct_change(n): fractional change from n rows ago to current
+    dataset["return_3"]  = dataset["close"].pct_change(3)
+    dataset["return_6"]  = dataset["close"].pct_change(6)
+    dataset["return_12"] = dataset["close"].pct_change(12)
+    dataset["return_24"] = dataset["close"].pct_change(24)
+    dataset["return_72"] = dataset["close"].pct_change(72)
+
+    # ── Trend position ──────────────────────────────────────────────────────
+    dataset["ma_gap_short"]  = (dataset["MA_10"] - dataset["MA_30"]) / dataset["close"]
+    dataset["ma_gap_50_100"] = (dataset["MA_50"] - dataset["MA_100"]) / dataset["close"]
+    dataset["ma_gap_trend"]  = (dataset["close"] - dataset["MA_200"]) / dataset["close"]
+    dataset["ma_50_dist"]    = (dataset["close"] - dataset["MA_50"])  / dataset["close"]
+    dataset["ma_100_dist"]   = (dataset["close"] - dataset["MA_100"]) / dataset["close"]
+
+    # ── Momentum oscillators ────────────────────────────────────────────────
+    dataset["rsi_scaled"]         = dataset["RSI"] / 100.0
+    dataset["rsi_change_6"]       = (dataset["RSI"] - dataset["RSI"].shift(6)) / 100.0  # .shift(6): RSI from 6 rows ago — change in RSI scaled to 0-1
+    dataset["macd_hist_pct"]      = (dataset["MACD"] - dataset["MACD_signal"]) / dataset["close"]
+    dataset["price_acceleration"] = dataset["return_1"] - dataset["return_6"]  # is momentum building or fading?
+
+    # ── Volatility ──────────────────────────────────────────────────────────
+    dataset["atr_pct"]       = dataset["ATR"] / dataset["close"]
+    dataset["volatility_24"] = dataset["VOL_24"]
+    bb_range = dataset["BB_upper"] - dataset["BB_lower"]
+    dataset["bb_position"]  = (dataset["close"] - dataset["BB_lower"]) / bb_range.replace(0, np.nan)
+    dataset["bb_width_pct"] = bb_range / dataset["close"]
+
+    # ── Volume features ─────────────────────────────────────────────────────
+    dataset["volume_change"]   = dataset["volume"].pct_change().replace([np.inf, -np.inf], np.nan)
+    dataset["volume_zscore"]   = (dataset["volume"] - dataset["VOL_MA_20"]) / dataset["VOL_STD_20"].replace(0, np.nan)  # z-score: how unusual is current volume
+    dataset["volume_ma_ratio"] = dataset["volume"] / dataset["VOL_MA_20"].replace(0, np.nan)  # relative volume vs 20-period average
+
+    # ── Candle shape ────────────────────────────────────────────────────────
+    candle_range = (dataset["high"] - dataset["low"]).replace(0, np.nan)  # full candle range; .replace(0, nan): avoid divide-by-zero on dojis
+    body = (dataset["close"] - dataset["open"]).abs()  # absolute body size
+    upper_wick = dataset["high"] - dataset[["open", "close"]].max(axis=1)  # .max(axis=1): row-wise max of open and close
+    lower_wick = dataset[["open", "close"]].min(axis=1) - dataset["low"]   # .min(axis=1): row-wise min of open and close
+    dataset["body_pct"]       = body / candle_range
+    dataset["upper_wick_pct"] = upper_wick / candle_range
+    dataset["lower_wick_pct"] = lower_wick / candle_range
+
+    # ── Time features ───────────────────────────────────────────────────────
+    dataset["hour_of_day"] = dataset["timestamp"].dt.hour / 23.0       # .dt.hour: extract hour 0-23 then scale to 0-1
+    dataset["day_of_week"] = dataset["timestamp"].dt.dayofweek / 6.0   # .dt.dayofweek: 0=Mon … 6=Sun then scale to 0-1
+
+    # ── Trend persistence ───────────────────────────────────────────────────
+    dataset["dist_from_high_20"] = (dataset["close"] - dataset["HIGH_20"]) / dataset["close"]  # how far below the rolling 20-period high
+    dataset["dist_from_low_20"]  = (dataset["close"] - dataset["LOW_20"])  / dataset["close"]  # how far above the rolling 20-period low
 
     dataset["future_close"] = dataset["close"].shift(-horizon)  # shift(-horizon): move the close column `horizon` rows UP — so row i now shows the closing price `horizon` candles in the future; this is the prediction target
     dataset["target_up"] = (dataset["future_close"] > dataset["close"]).astype(int)  # create the binary label: 1 if price will be higher in `horizon` candles, 0 if lower; .astype(int): convert True/False to 1/0
@@ -173,10 +295,12 @@ def run_ml_experiment(  # train a logistic-regression model and evaluate it on a
         )),
     ])
 
-    param_grid = {  # XGBoost has 3 main hyperparameters worth tuning — grid-search over a small but meaningful range
-        "clf__n_estimators":  [100, 300],   # n_estimators: how many sequential trees to build; more = better fit but slower and risks overfitting
-        "clf__max_depth":     [3, 5],       # max_depth: maximum depth of each tree; shallow trees = simpler, less overfitting; deep trees = more complex patterns
-        "clf__learning_rate": [0.05, 0.1],  # learning_rate (eta): how strongly each new tree's correction is applied; smaller = more conservative learning, often more robust
+    param_grid = {  # XGBoost has several knobs worth tuning — wider grid now that we have 29 features and more degrees of freedom
+        "clf__n_estimators":  [200, 400],          # n_estimators: total number of sequential trees; more = better fit but slower and risks overfitting
+        "clf__max_depth":     [3, 5],              # max_depth: maximum depth of each tree; shallow = simpler, less overfitting; deep = more complex feature interactions
+        "clf__learning_rate": [0.05, 0.1],         # learning_rate (eta): how strongly each new tree's correction is applied; smaller = more conservative
+        "clf__subsample":     [0.8],               # subsample: fraction of rows each tree sees (random); <1.0 adds regularisation by preventing trees from memorising the full dataset
+        "clf__colsample_bytree": [0.8],            # colsample_bytree: fraction of FEATURES each tree sees; <1.0 forces diversity across trees, reduces overfitting on noisy features
     }
     tscv = TimeSeriesSplit(n_splits=5)  # TimeSeriesSplit(n_splits=5): 5 chronological folds — each fold's test set is strictly after its training set (no future data leakage)
     grid = GridSearchCV(  # GridSearchCV: tries every combination of the param_grid values

@@ -7,30 +7,37 @@ import pandas as pd  # pandas: needed to build synthetic DataFrames for testing
 from quant_bot.ml import MLModel, build_ml_dataset, compute_features_at_row, run_ml_experiment  # import the four ML functions/classes we want to test
 
 
-def _make_df(rows: int = 300) -> pd.DataFrame:  # helper function: creates a minimal synthetic DataFrame with all columns the ML code expects — no real Binance data needed for tests
-    # IMPORTANT: price must oscillate (go up AND down) so that target_up contains both 0s and 1s.
-    # sklearn's LogisticRegression raises ValueError if all labels are the same class.
-    close = [100 + 20 * math.sin(i * 0.2) for i in range(rows)]  # math.sin(): returns values between -1 and +1; ×20 scales the oscillation to ±$20 around $100 — creates realistic up-and-down movements
-    return pd.DataFrame(  # build a synthetic OHLCV+indicator table
-        {
-            "timestamp": pd.date_range("2025-01-01", periods=rows, freq="h"),  # hourly timestamps starting 2025-01-01
-            "open":   [c - 0.1 for c in close],  # open slightly below close
-            "high":   [c + 0.5 for c in close],  # high slightly above close
-            "low":    [c - 0.5 for c in close],  # low slightly below close
-            "close":  close,  # the oscillating price series
-            "volume": [1_000 + (i % 100) for i in range(rows)],  # % 100: modulo keeps volume oscillating 1000–1099
-            "MA_10":  [100 + 18 * math.sin(i * 0.2) for i in range(rows)],  # MA10 slightly smaller amplitude than close
-            "MA_30":  [100 + 16 * math.sin(i * 0.2) for i in range(rows)],  # MA30 smaller amplitude — slower-moving
-            "MA_200": [100 + 10 * math.sin(i * 0.2) for i in range(rows)],  # MA200 smallest amplitude — slowest
-            "RSI":    [55.0] * rows,  # constant RSI of 55 — neutral, avoids NaN issues
-            # NEW columns required by the expanded feature set:
-            "MACD":         [0.5 * math.sin(i * 0.2) for i in range(rows)],   # synthetic MACD line — oscillates around 0
-            "MACD_signal":  [0.4 * math.sin(i * 0.2) for i in range(rows)],   # synthetic signal line — slightly smaller amplitude
-            "BB_upper":     [100 + 25 * math.sin(i * 0.2) for i in range(rows)],  # upper Bollinger band — wider than close
-            "BB_lower":     [100 + 15 * math.sin(i * 0.2) for i in range(rows)],  # lower Bollinger band — narrower than close (always above-below relationship preserved)
-            "ATR":          [2.0] * rows,  # constant ATR = 2.0 — represents stable volatility
-        }
-    )
+def _make_df(rows: int = 300) -> pd.DataFrame:  # helper function: creates a minimal synthetic DataFrame with all columns the ML code expects
+    # Price must oscillate so target_up contains both 0s and 1s (XGBoost needs both classes).
+    close = [100 + 20 * math.sin(i * 0.2) for i in range(rows)]  # oscillates ±$20 around $100
+    return pd.DataFrame({
+        "timestamp": pd.date_range("2025-01-01", periods=rows, freq="h"),  # hourly timestamps
+        "open":   [c - 0.1 for c in close],
+        "high":   [c + 0.5 for c in close],
+        "low":    [c - 0.5 for c in close],
+        "close":  close,
+        "volume": [1_000 + (i % 100) for i in range(rows)],
+        # Moving averages
+        "MA_10":  [100 + 18 * math.sin(i * 0.2) for i in range(rows)],
+        "MA_30":  [100 + 16 * math.sin(i * 0.2) for i in range(rows)],
+        "MA_50":  [100 + 14 * math.sin(i * 0.2) for i in range(rows)],   # NEW
+        "MA_100": [100 + 12 * math.sin(i * 0.2) for i in range(rows)],   # NEW
+        "MA_200": [100 + 10 * math.sin(i * 0.2) for i in range(rows)],
+        # Oscillators
+        "RSI":         [55.0] * rows,
+        "MACD":        [0.5 * math.sin(i * 0.2) for i in range(rows)],
+        "MACD_signal": [0.4 * math.sin(i * 0.2) for i in range(rows)],
+        # Bollinger + ATR
+        "BB_upper": [100 + 25 * math.sin(i * 0.2) for i in range(rows)],
+        "BB_lower": [100 + 15 * math.sin(i * 0.2) for i in range(rows)],
+        "ATR":      [2.0] * rows,
+        # NEW indicators required by the expanded feature set:
+        "VOL_MA_20":  [1_050.0] * rows,  # constant 20-period average volume
+        "VOL_STD_20": [30.0]    * rows,  # constant 20-period volume std
+        "VOL_24":     [0.01]    * rows,  # constant 24-period return-std volatility
+        "HIGH_20":    [c + 1.0  for c in close],  # rolling 20-period high — slightly above close
+        "LOW_20":     [c - 1.0  for c in close],  # rolling 20-period low — slightly below close
+    })
 
 
 class TestBuildMLDataset(unittest.TestCase):  # test group for the build_ml_dataset() function
@@ -53,16 +60,16 @@ class TestComputeFeaturesAtRow(unittest.TestCase):  # test group for the row-lev
 
     def test_returns_none_for_early_rows(self) -> None:  # verify that rows with insufficient history return None
         df = _make_df()  # create synthetic data
-        self.assertIsNone(compute_features_at_row(df, 0))   # row 0: no history at all — must return None
-        self.assertIsNone(compute_features_at_row(df, 23))  # row 23: not enough for return_24 (needs 24 rows back) — must return None
+        self.assertIsNone(compute_features_at_row(df, 0))   # row 0: no history — must return None
+        self.assertIsNone(compute_features_at_row(df, 71))  # row 71: not enough for return_72 (needs 72 rows back) — must return None
 
-    def test_returns_dict_with_all_features_after_warmup(self) -> None:  # verify that after 24+ rows we get a complete feature dict
+    def test_returns_dict_with_all_features_after_warmup(self) -> None:  # verify that after the warmup we get a complete feature dict
         from quant_bot.ml import FEATURE_COLUMNS  # the authoritative feature name list
         df = _make_df()
-        features = compute_features_at_row(df, 50)  # row 50 has plenty of history
+        features = compute_features_at_row(df, 150)  # row 150 has plenty of history for all 29 features
         self.assertIsNotNone(features)  # assertIsNotNone(): confirm we got a dict back (not None)
         for col in FEATURE_COLUMNS:  # loop over each expected feature name
-            self.assertIn(col, features)  # assertIn(): check the key exists in the returned dict — verifies no feature is missing
+            self.assertIn(col, features)  # assertIn(): check the key exists in the returned dict
 
 
 class TestRunMLExperiment(unittest.TestCase):  # test group for the full ML training and evaluation function

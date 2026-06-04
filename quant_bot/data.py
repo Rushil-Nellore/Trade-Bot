@@ -77,7 +77,22 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:  # takes a raw OHLCV table
     true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)  # pd.concat(axis=1): stack the 3 series as columns; .max(axis=1): take the largest of the 3 per row → True Range
     df["ATR"] = true_range.rolling(window=14).mean().astype(float)  # 14-period MA of True Range = ATR; .astype(float): keep plain float dtype
 
-    return df  # return the DataFrame now enriched with MA, RSI, MACD, Bollinger Bands, and ATR columns
+    # ── Additional MAs for richer trend information ──────────────────────────
+    df["MA_50"]  = df["close"].rolling(window=50).mean()   # 50-period MA — medium-term trend (between MA_30 and MA_200)
+    df["MA_100"] = df["close"].rolling(window=100).mean()  # 100-period MA — medium-long-term trend
+
+    # ── Volume statistics ────────────────────────────────────────────────────
+    df["VOL_MA_20"]  = df["volume"].rolling(window=20).mean()  # 20-period average volume — baseline for "normal" volume
+    df["VOL_STD_20"] = df["volume"].rolling(window=20).std()   # 20-period std of volume — used for z-score normalisation
+
+    # ── 24-period return volatility ──────────────────────────────────────────
+    df["VOL_24"] = df["close"].pct_change().rolling(window=24).std().astype(float)  # rolling std of hourly returns over last 24 hours — measures how choppy the market is
+
+    # ── 20-period rolling high/low (used to compute dist_from_high/low) ──────
+    df["HIGH_20"] = df["high"].rolling(window=20).max()  # rolling 20-period maximum of high prices
+    df["LOW_20"]  = df["low"].rolling(window=20).min()   # rolling 20-period minimum of low prices
+
+    return df  # return the DataFrame now enriched with all indicators
 
 
 def get_price_data(
