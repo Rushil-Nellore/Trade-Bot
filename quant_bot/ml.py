@@ -6,10 +6,9 @@ from dataclasses import dataclass  # dataclass decorator — auto-generates __in
 import numpy as np  # NumPy: fast numerical array library — used for array operations and math
 import pandas as pd  # pandas: data-table library — pd.DataFrame, pd.Timestamp
 
-from sklearn.linear_model import LogisticRegression  # LogisticRegression: sklearn's production-grade binary classifier — replaces the scratch implementation; handles regularisation, convergence checks, and numerical stability automatically
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit  # GridSearchCV: tries every combination of hyperparameters and picks the best; TimeSeriesSplit: cross-validation that respects time order — never trains on data that comes after the test set
-from sklearn.pipeline import Pipeline  # Pipeline: chains multiple sklearn steps (e.g. scaler → model) into one object so fit/predict applies both steps in the correct order
-from sklearn.preprocessing import StandardScaler  # StandardScaler: subtracts the mean and divides by the std of each feature — puts all features on the same scale so no single feature dominates
+from sklearn.pipeline import Pipeline  # Pipeline: chains multiple sklearn steps into one object so fit/predict applies them in the correct order
+from xgboost import XGBClassifier  # XGBClassifier: eXtreme Gradient Boosting — an ensemble of decision trees that learns SEQUENTIALLY from previous trees' mistakes; replaces LogisticRegression for higher accuracy on non-linear patterns
 
 from quant_bot.config import DEFAULT_ML_HORIZON, DEFAULT_TRAIN_RATIO  # the two default values this module needs from config
 
@@ -148,34 +147,52 @@ def run_ml_experiment(  # train a logistic-regression model and evaluate it on a
     train_y = train["target_up"].to_numpy(dtype=float)  # .to_numpy(): convert the pandas Series to a NumPy array — sklearn requires arrays not Series; dtype=float: ensure numeric type
     test_y  = test["target_up"].to_numpy(dtype=int)    # test labels as integers (0 or 1) — used for accuracy calculation
 
-    # ── Tuned logistic regression via GridSearchCV + TimeSeriesSplit ──────────
-    # Improvements over the previous fixed-C version:
-    #   1. class_weight="balanced" — weights samples inversely to class frequency, helping when the up/down split is not 50/50
-    #   2. GridSearchCV — tries multiple C (regularisation) values and picks the best
-    #   3. TimeSeriesSplit — cross-validation that respects time order (never trains on a fold AFTER its test fold), unlike normal CV which would leak future data
-    base_pipeline = Pipeline([  # Pipeline: chain preprocessing and the classifier into a single object
-        ("scaler", StandardScaler()),  # step 1 — StandardScaler: subtract the mean and divide by std for each feature so they're all on the same scale
-        ("clf",    LogisticRegression(  # step 2 — sklearn's production logistic regression
-            max_iter=2000,              # allow up to 2000 iterations to converge — needed because larger C values require more iterations
-            random_state=42,            # fixes the random seed so results are reproducible
-            class_weight="balanced",    # NEW: weights each class inversely proportional to its frequency — prevents the model from just predicting the majority class
-            solver="lbfgs",             # lbfgs: a fast quasi-Newton optimiser, good default for small/medium datasets
+    # ── XGBoost classifier — tuned via GridSearchCV + TimeSeriesSplit ─────────
+    # WHY XGBoost over logistic regression?
+    #   1. Captures NON-LINEAR patterns (e.g. "RSI > 70 AND volume spiking" together — a tree can split on both)
+    #   2. Captures FEATURE INTERACTIONS automatically (logistic regression only sums each feature independently)
+    #   3. Trees are scale-invariant — no StandardScaler needed; trees split on raw feature values
+    #   4. Boosting: each new tree corrects the mistakes (gradient errors) of all previous trees
+    #
+    # Handling class imbalance:
+    #   scale_pos_weight = count(negative class) / count(positive class)
+    #   tells XGBoost to weight the minority class higher when computing the loss gradient
+    pos_count = float((train_y == 1).sum())  # count training examples labelled 1 (price went up)
+    neg_count = float((train_y == 0).sum())  # count training examples labelled 0 (price went down or flat)
+    scale_pos_weight = (neg_count / pos_count) if pos_count > 0 else 1.0  # ratio: if negatives are more common, weight positives proportionally higher
+
+    base_pipeline = Pipeline([  # Pipeline: keeps the same interface as before so MLModel.predict_proba() does not need to change
+        ("clf", XGBClassifier(  # XGBClassifier: gradient-boosted decision trees for binary classification
+            objective="binary:logistic",  # objective: tells XGBoost we're doing binary classification with logistic loss (outputs probabilities)
+            eval_metric="logloss",        # eval_metric: how XGBoost measures error during training — logloss is the natural choice for probability outputs
+            random_state=42,              # fixes the random seed so results are reproducible across runs
+            scale_pos_weight=scale_pos_weight,  # class-imbalance correction — equivalent to logistic regression's class_weight="balanced"
+            n_jobs=-1,                    # use all CPU cores for training a single model — much faster
+            tree_method="hist",           # tree_method="hist": fast histogram-based tree builder; dramatically faster than "exact" on medium datasets
+            verbosity=0,                  # silence XGBoost's own progress logs — we use our own logger.info() instead
         )),
     ])
-    param_grid = {  # the grid of hyperparameter values to try — GridSearchCV will train one model per combination
-        "clf__C": [0.01, 0.1, 1.0, 10.0],  # clf__C: the "C" parameter of the "clf" step in the pipeline; tries 4 different regularisation strengths (low C = more regularisation = simpler model)
+
+    param_grid = {  # XGBoost has 3 main hyperparameters worth tuning — grid-search over a small but meaningful range
+        "clf__n_estimators":  [100, 300],   # n_estimators: how many sequential trees to build; more = better fit but slower and risks overfitting
+        "clf__max_depth":     [3, 5],       # max_depth: maximum depth of each tree; shallow trees = simpler, less overfitting; deep trees = more complex patterns
+        "clf__learning_rate": [0.05, 0.1],  # learning_rate (eta): how strongly each new tree's correction is applied; smaller = more conservative learning, often more robust
     }
-    tscv = TimeSeriesSplit(n_splits=5)  # TimeSeriesSplit(n_splits=5): split the training data into 5 chronological folds; each fold's test set comes AFTER its training set — preserves time ordering
-    grid = GridSearchCV(  # GridSearchCV: exhaustively tries each parameter combination using cross-validation, picks the one with the best average score
-        estimator=base_pipeline,        # the pipeline to tune
-        param_grid=param_grid,          # the values to try
-        cv=tscv,                        # use the time-series CV instead of random k-fold (which would leak future data)
-        scoring="accuracy",             # pick the C that maximises classification accuracy across the 5 folds
-        n_jobs=-1,                      # n_jobs=-1: use all CPU cores in parallel — much faster
+    tscv = TimeSeriesSplit(n_splits=5)  # TimeSeriesSplit(n_splits=5): 5 chronological folds — each fold's test set is strictly after its training set (no future data leakage)
+    grid = GridSearchCV(  # GridSearchCV: tries every combination of the param_grid values
+        estimator=base_pipeline,  # the pipeline to tune
+        param_grid=param_grid,    # 2 × 2 × 2 = 8 combinations to try
+        cv=tscv,                  # use time-series CV
+        scoring="accuracy",       # pick the combination that maximises accuracy across the 5 folds
+        n_jobs=-1,                # use all CPU cores in parallel across the 8 × 5 = 40 model fits
     )
-    grid.fit(train_x.to_numpy(dtype=float), train_y)  # .fit(): runs the grid search — trains 4 (C values) × 5 (folds) = 20 small models, picks the best C
-    pipeline = grid.best_estimator_  # .best_estimator_: the pipeline retrained on the FULL training set using the best C found by the grid search
-    logger.info("GridSearchCV best C = %s (CV accuracy %.1f%%)", grid.best_params_["clf__C"], grid.best_score_ * 100)  # log which C won and how well it scored in cross-validation
+    grid.fit(train_x.to_numpy(dtype=float), train_y)  # .fit(): runs the grid search — 40 small XGBoost fits, picks the best hyperparameter combination
+    pipeline = grid.best_estimator_  # .best_estimator_: the pipeline retrained on the FULL training set using the winning hyperparameters
+    logger.info(  # log which combination won and its CV accuracy
+        "GridSearchCV best params = %s (CV accuracy %.1f%%)",
+        grid.best_params_,
+        grid.best_score_ * 100,
+    )
 
     probabilities = pipeline.predict_proba(test_x.to_numpy(dtype=float))[:, 1]  # pipeline.predict_proba(): run test data through scaler then classifier; returns shape (n_rows, 2) — column 0 is P(down), column 1 is P(up); [:, 1]: take all rows, column 1 = P(price goes up)
     predictions = (probabilities >= 0.5).astype(int)  # threshold at 0.5: probability ≥ 0.5 → predict 1 (up), below 0.5 → predict 0 (down); .astype(int): convert boolean array to 0/1
@@ -190,14 +207,16 @@ def run_ml_experiment(  # train a logistic-regression model and evaluate it on a
     prediction_frame["probability_up"] = probabilities  # add the raw probability (e.g. 0.62 = 62% chance of going up)
     prediction_frame["correct"] = prediction_frame["prediction"] == prediction_frame["target_up"]  # True where prediction matched the actual outcome — for easy analysis
 
-    weights = pipeline.named_steps["clf"].coef_[0]  # .named_steps["clf"]: access the LogisticRegression step by its name; .coef_[0]: the 7 learned weights (one per feature); [0] because coef_ is 2D for binary classification
+    # XGBoost uses .feature_importances_ — measures how often each feature is used to split trees, weighted by the gain
+    # (logistic regression used .coef_ — signed weights; XGBoost importances are always non-negative)
+    importances = pipeline.named_steps["clf"].feature_importances_  # array of 11 non-negative importance scores, one per feature, summing to 1.0
     feature_importance = pd.DataFrame(  # pd.DataFrame(): build a table from a dict of equal-length lists
         {
-            "feature":    FEATURE_COLUMNS,  # column of feature names
-            "weight":     weights,          # column of raw signed weights — positive = model thinks this feature predicts price going up
-            "abs_weight": np.abs(weights),  # np.abs(): absolute value of each weight — used for ranking without direction
+            "feature":    FEATURE_COLUMNS,    # column of feature names
+            "weight":     importances,        # column of XGBoost importance scores — bigger = more useful for splitting trees
+            "abs_weight": np.abs(importances),  # np.abs(): absolute value (already non-negative for XGBoost but kept for schema compatibility)
         }
-    ).sort_values("abs_weight", ascending=False, ignore_index=True)  # sort_values(): reorder rows by abs_weight largest first so most important features appear at the top; ignore_index=True: renumber rows 0,1,2,...
+    ).sort_values("abs_weight", ascending=False, ignore_index=True)  # sort_values(): reorder rows by importance, largest first; ignore_index=True: renumber rows 0,1,2,...
 
     train_cutoff_ts = pd.Timestamp(test["timestamp"].iloc[0])  # pd.Timestamp(): ensure we have a proper Timestamp object; .iloc[0]: the first row of the test set — this is the exact point where training ends and testing begins
 
