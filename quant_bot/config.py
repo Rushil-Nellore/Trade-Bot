@@ -18,9 +18,21 @@ ML_REPORT_PATH = "ml_report.csv"
 # 0.20 = 20 % per trade; keeps the rest in cash and prevents ruin on a single bad trade.
 POSITION_SIZE_PCT = 0.20
 
+# ── Regime-aware position sizing (NEW) ────────────────────────────────────────
+# In confirmed uptrends (price comfortably above MA200 AND MA200 is rising) the
+# bot uses a bigger position to capture more of bull-market upside.
+# In choppy/bear regimes it falls back to the conservative POSITION_SIZE_PCT.
+BULL_POSITION_SIZE_PCT = 0.40       # 40% of cash per trade in strong uptrends (vs 20% in choppy markets)
+BULL_REGIME_MA200_BUFFER = 0.03     # price must be at least 3% above MA200 to count as "strong" uptrend (not just barely above)
+
+# ── Regime-aware trailing stop (NEW) ──────────────────────────────────────────
+# In a strong uptrend the bot uses a wider trailing stop so it does not get
+# kicked out by routine 5% pullbacks during a trending bull run.
+BULL_TRAILING_STOP_PCT = 0.10       # 10% trailing stop in strong uptrends (vs 5% in choppy markets)
+
 # ── ML confidence gate ────────────────────────────────────────────────────────
-# The logistic-regression model must predict at least this probability of price
-# going up before the backtester is allowed to enter a trade.
+# The XGBoost model must predict at least this probability of price going up
+# before the backtester is allowed to enter a trade.
 # Applied only AFTER the model's training cutoff (no lookahead).
 ML_CONFIDENCE_THRESHOLD = 0.55
 

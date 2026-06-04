@@ -6,10 +6,13 @@ import numpy as np  # NumPy: fast numerical array library — used for Sharpe ra
 import pandas as pd  # pandas: data-table library — pd.DataFrame, pd.isna(), pd.Timestamp
 
 from quant_bot.config import (  # import the constants this file needs from the central config
+    BULL_POSITION_SIZE_PCT,     # 0.40 = 40% of cash per trade in confirmed uptrends (NEW — regime-aware sizing)
+    BULL_REGIME_MA200_BUFFER,   # 0.03 = price must be ≥3% above MA200 to count as a strong uptrend (NEW)
+    BULL_TRAILING_STOP_PCT,     # 0.10 = wider 10% trailing stop in confirmed uptrends to ride trends longer (NEW)
     FEE_RATE,                   # 0.001 = 0.1% — deducted on every buy and every sell
     HARD_STOP_PCT,              # 0.04 = 4% — exit if price drops 4% below entry
     ML_CONFIDENCE_THRESHOLD,    # 0.55 — ML model must be ≥55% confident before we buy
-    POSITION_SIZE_PCT,          # 0.20 — only risk 20% of cash per trade
+    POSITION_SIZE_PCT,          # 0.20 — only risk 20% of cash per trade in choppy/bear markets
 )
 from quant_bot.ml import MLModel, compute_features_at_row  # MLModel: the trained classifier; compute_features_at_row: computes the 7 ML features for a single candle
 from quant_bot.models import SimulationResult  # the dataclass container that holds all backtest outputs
@@ -35,6 +38,9 @@ def simulate(  # the main backtest engine — loops through every candle and sim
     buy_price = 0.0  # the price at which we entered the current trade
     peak_price = 0.0  # the highest price BTC reached since we bought — updated every candle while in trade
     entry_value = 0.0  # how many USD we committed to the current trade (trade_cash at entry)
+    current_trailing_stop = trailing_stop_pct  # per-trade trailing stop — set at entry based on market regime; default to caller's value until a trade opens
+    bull_entries = 0  # count entries made in confirmed uptrends (used for the summary log)
+    normal_entries = 0  # count entries made in choppy/sideways markets
 
     trades: list[float] = []  # collects the P&L (profit or loss) of each completed trade as a float
     trade_log: list[dict[str, object]] = []  # detailed record of every trade — each trade is a dict; saved to trade_log.csv
@@ -87,27 +93,48 @@ def simulate(  # the main backtest engine — loops through every candle and sim
                         balance_history.append((timestamp, portfolio_value))
                         continue
 
-                trade_cash = cash_balance * position_size_pct  # calculate how much USD to invest: 20% of current cash — prevents all-in bets
-                if trade_cash < _MIN_TRADE_VALUE:  # if 20% of cash is less than $10, the position is too small to be worth opening
+                # ── Regime detection (NEW): is this a confirmed strong uptrend? ───
+                # Strong uptrend = price comfortably above MA200 (by > buffer) AND MA200 itself rising.
+                # In strong uptrends we use bigger position size + wider trailing stop to ride trends.
+                # In choppy/sideways markets we use the conservative defaults.
+                is_strong_uptrend = (
+                    price >= ma200_now * (1 + BULL_REGIME_MA200_BUFFER)  # price ≥ 3% above MA200 — not just barely above
+                    and ma200_now > ma200_prev  # MA200 itself is sloping up
+                )
+                if is_strong_uptrend:
+                    active_position_pct = BULL_POSITION_SIZE_PCT  # 40% — go bigger when the trend is clearly with us
+                    current_trailing_stop = BULL_TRAILING_STOP_PCT  # 10% — give the trade room to breathe in trending markets
+                    bull_entries += 1  # tally for the summary log
+                else:
+                    active_position_pct = position_size_pct  # 20% — conservative default
+                    current_trailing_stop = trailing_stop_pct  # 5% — tighter stop in choppy markets
+                    normal_entries += 1
+
+                trade_cash = cash_balance * active_position_pct  # calculate USD to invest using the regime-appropriate position size
+                if trade_cash < _MIN_TRADE_VALUE:  # if the position is below the $10 minimum, skip — not worth the fees
                     balance_history.append((timestamp, portfolio_value))
                     continue
 
-                entry_value = trade_cash  # record how much USD we are committing to this trade — used later to calculate P&L
-                btc_position = (trade_cash * (1 - FEE_RATE)) / price  # calculate how much BTC we receive: (1 - 0.001) deducts the 0.1% buy fee, then divide by price to convert USD to BTC
-                cash_balance -= trade_cash  # subtract the invested amount from cash — the rest stays in cash earning 0%
-                buy_price = price  # remember the entry price for stop-loss calculations
+                entry_value = trade_cash  # record how much USD we are committing — used later to calculate P&L
+                btc_position = (trade_cash * (1 - FEE_RATE)) / price  # BTC received after paying 0.1% buy fee
+                cash_balance -= trade_cash  # subtract invested amount from cash
+                buy_price = price  # remember entry price for stop calculations
                 entry_timestamp = timestamp  # remember when we entered for the trade log
-                peak_price = price  # initialise the trailing peak to the entry price
-                in_trade = True  # set the flag — we are now in an open position
-                buy_signals.append((timestamp, price))  # record (time, price) for the chart's green triangle markers
+                peak_price = price  # initialise trailing peak to entry price
+                in_trade = True  # mark us as in an open position
+                buy_signals.append((timestamp, price))  # record buy signal for chart
 
-                prob_str = f"{ml_prob:.0%}" if ml_prob is not None else "no-gate"  # format ML probability as a percentage string if we have one, otherwise "no-gate" (before the training cutoff)
-                logger.info(  # log the buy event — visible in the terminal
-                    "BUY  $%s | %s | ML=%s | cash_remaining=$%s",
-                    f"{price:,.2f}",       # entry price formatted with comma separator and 2 decimal places
-                    timestamp,             # the candle timestamp
-                    prob_str,              # ML confidence or "no-gate"
-                    f"{cash_balance:,.2f}",  # how much cash is still available after this trade
+                prob_str = f"{ml_prob:.0%}" if ml_prob is not None else "no-gate"  # format ML probability
+                regime = "BULL" if is_strong_uptrend else "norm"  # short regime label for the log
+                logger.info(  # log the buy event with regime info
+                    "BUY  $%s | %s | regime=%s | size=%.0f%% | trail=%.0f%% | ML=%s | cash=$%s",
+                    f"{price:,.2f}",
+                    timestamp,
+                    regime,
+                    active_position_pct * 100,    # show actual position % used for this trade
+                    current_trailing_stop * 100,  # show actual trailing stop % used for this trade
+                    prob_str,
+                    f"{cash_balance:,.2f}",
                 )
 
         else:  # ── exit logic: only runs when we are already holding a BTC position ──
@@ -116,7 +143,7 @@ def simulate(  # the main backtest engine — loops through every candle and sim
                 price=price,
                 buy_price=buy_price,
                 peak_price=peak_price,
-                trailing_stop_pct=trailing_stop_pct,
+                trailing_stop_pct=current_trailing_stop,  # use the per-trade trailing stop set at entry (5% or 10% depending on regime)
                 hard_stop_pct=HARD_STOP_PCT,
             )
 
@@ -201,13 +228,15 @@ def simulate(  # the main backtest engine — loops through every candle and sim
 
     profitable = sum(1 for t in trades if t > 0)  # generator expression counts how many completed trades had positive P&L; sum() adds them up
     logger.info(  # print the final summary to the terminal
-        "--- SUMMARY | trades=%d profitable=%d | drawdown=%.1f%% | Sharpe=%.2f | balance=$%s | buy-and-hold=%.1f%%",
+        "--- SUMMARY | trades=%d (bull=%d norm=%d) profitable=%d | drawdown=%.1f%% | Sharpe=%.2f | balance=$%s | buy-and-hold=%.1f%%",
         len(trades),             # total number of completed trades
+        bull_entries,            # how many trades were taken in confirmed uptrends (got the 40% / 10% treatment)
+        normal_entries,          # how many were taken in choppy markets (got the 20% / 5% treatment)
         profitable,              # how many made money
-        max_drawdown * 100,      # convert fraction to percentage (e.g. 0.03 → 3.0%)
-        sharpe_ratio,            # annualised Sharpe ratio
-        f"{final_balance:,.2f}", # final portfolio value formatted with commas
-        buy_and_hold_return * 100,  # buy-and-hold return as percentage
+        max_drawdown * 100,      # convert fraction to percentage
+        sharpe_ratio,            # annualised Sharpe
+        f"{final_balance:,.2f}", # final portfolio value
+        buy_and_hold_return * 100,  # buy-and-hold benchmark
     )
 
     return SimulationResult(  # pack all outputs into the dataclass and return to the caller
