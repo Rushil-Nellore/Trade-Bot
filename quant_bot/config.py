@@ -36,6 +36,14 @@ BULL_TRAILING_STOP_PCT = 0.10       # 10% trailing stop in strong uptrends (vs 5
 # Applied only AFTER the model's training cutoff (no lookahead).
 ML_CONFIDENCE_THRESHOLD = 0.55
 
+# ── Live trading configuration (NEW) ──────────────────────────────────────────
+# These URLs let the live trader hit either Binance's free testnet (fake money,
+# real-time prices) or the real exchange. ALWAYS test on testnet first.
+# Sign up for free testnet API keys at: https://testnet.binance.vision
+BINANCE_TESTNET_REST_URL = "https://testnet.binance.vision"  # Spot testnet — fake money, real market data
+BINANCE_LIVE_REST_URL    = "https://api.binance.com"         # Production — REAL MONEY (do not use until paper-trading proves itself)
+LIVE_STATE_PATH = "live_state.json"  # file where the live trader persists cash balance, position, peak price etc. between runs
+
 # ── Historical market periods — presets for bot.py CLI and Streamlit dropdown ──
 # Each entry maps a friendly name to a (days, end_date) combo.
 # end_date=None means "ending today".

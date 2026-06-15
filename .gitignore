@@ -4,3 +4,7 @@ __pycache__/
 *.pyc
 trade_log.csv
 ml_report.csv
+
+# Live trading — NEVER commit these (contain API keys / live positions)
+.env
+live_state.json
