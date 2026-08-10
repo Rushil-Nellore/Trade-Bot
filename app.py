@@ -1,12 +1,12 @@
-from __future__ import annotations  # enables newer type-hint syntax on Python 3.9 and earlier
+from __future__ import annotations
 
-import json     # standard library — used to read/write live_state.json for the paper-trade tab
-import logging  # Python's built-in logging library — forward logs to Streamlit's terminal
-import os       # standard library — read Binance API credentials from environment variables
-from pathlib import Path  # object-oriented file path handling — cleaner than string manipulation
+import json
+import logging
+import os
+from pathlib import Path
 
-import pandas as pd  # data-table library — used to load and display CSVs
-import streamlit as st  # streamlit: the web dashboard framework — every st.* call renders a UI element
+import pandas as pd
+import streamlit as st
 
 from quant_bot.config import (
     DEFAULT_DAYS,
@@ -14,26 +14,24 @@ from quant_bot.config import (
     DEFAULT_ML_HORIZON,
     DEFAULT_SYMBOL,
     INITIAL_BALANCE,
-    LIVE_STATE_PATH,          # NEW: filename where live_trader.py persists cash/position between runs
+    LIVE_STATE_PATH,
     NOTABLE_PERIODS,
 )
-from quant_bot.pipeline import run_full_pipeline  # runs the backtest pipeline (fetch data → train ML → simulate → save outputs)
+from quant_bot.pipeline import run_full_pipeline
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 
-st.set_page_config(page_title="BTC Quant Dashboard", page_icon="📈", layout="wide")  # configure the browser tab
+st.set_page_config(page_title="BTC Quant Dashboard", page_icon="📈", layout="wide")
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def load_csv(path: str) -> pd.DataFrame:  # safely load a CSV — returns empty DataFrame if the file does not exist
+def load_csv(path: str) -> pd.DataFrame:
     file_path = Path(path)
     if not file_path.exists():
         return pd.DataFrame()
     return pd.read_csv(file_path)
 
 
-def load_live_state() -> dict:  # load the live-trader's state file (or empty dict if not yet created)
+def load_live_state() -> dict:
     p = Path(LIVE_STATE_PATH)
     if not p.exists():
         return {}
@@ -41,14 +39,10 @@ def load_live_state() -> dict:  # load the live-trader's state file (or empty di
         return json.load(f)
 
 
-# ── Cache the heavy resources so we do not retrain / reconnect on every rerun ──
-# Streamlit reruns the entire script on every widget change; caching prevents
-# retraining the XGBoost model and re-creating the Binance client each time.
-
-@st.cache_resource(show_spinner="Training XGBoost model on latest data...")  # @st.cache_resource: expensive object stored across reruns
+@st.cache_resource(show_spinner="Training XGBoost model on latest data...")
 def get_trained_model():
     """Fetch latest data and train the ML model once per Streamlit session."""
-    from quant_bot.data import get_price_data  # imported inside function so the app loads even if network is down
+    from quant_bot.data import get_price_data
     from quant_bot.ml import run_ml_experiment
     df = get_price_data(symbol=DEFAULT_SYMBOL, interval=DEFAULT_INTERVAL, days=DEFAULT_DAYS)
     result = run_ml_experiment(df, horizon=DEFAULT_ML_HORIZON)
@@ -62,25 +56,17 @@ def get_binance_client(api_key: str, api_secret: str, testnet: bool = True):
     return BinanceClient(api_key=api_key, api_secret=api_secret, testnet=testnet)
 
 
-# ── Title bar ─────────────────────────────────────────────────────────────────
-
 st.title("BTC Quant Trading Bot")
 st.caption("Backtest historical performance and paper-trade on Binance testnet from the same dashboard.")
 
 
-# ── Tabs — Backtest and Paper Trade sit side-by-side ─────────────────────────
-
-tab_backtest, tab_paper = st.tabs(["📊 Backtest", "🤖 Paper Trade"])  # st.tabs(): renders clickable tab bar; returns one context manager per tab
+tab_backtest, tab_paper = st.tabs(["📊 Backtest", "🤖 Paper Trade"])
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — BACKTEST (original functionality, unchanged behaviour)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-with tab_backtest:  # everything indented under this block renders inside the Backtest tab
-    with st.sidebar:  # sidebar is shared across tabs — put backtest controls here
+with tab_backtest:
+    with st.sidebar:
         st.header("Backtest Settings")
-        symbol = st.text_input("Symbol", value=DEFAULT_SYMBOL, key="bt_symbol")  # key= disambiguates from any similarly-named widget in the other tab
+        symbol = st.text_input("Symbol", value=DEFAULT_SYMBOL, key="bt_symbol")
         interval = st.selectbox("Interval", options=["1h", "4h", "1d"], index=0, key="bt_interval")
         days = st.slider("Lookback days", min_value=90, max_value=1095, value=DEFAULT_DAYS, step=30, key="bt_days")
 
@@ -97,13 +83,13 @@ with tab_backtest:  # everything indented under this block renders inside the Ba
             key="bt_preset",
         )
 
-        if selected_preset != preset_options[0]:  # user picked a preset
+        if selected_preset != preset_options[0]:
             preset_vals = NOTABLE_PERIODS[selected_preset]
             days = preset_vals["days"]
             preset_end = preset_vals["end_date"]
             st.text_input("End date (YYYY-MM-DD)", value=preset_end if preset_end else "", disabled=True, key="bt_enddate_readonly")
             end_date = preset_end
-        else:  # custom / no preset
+        else:
             end_date_input = st.text_input(
                 "End date (YYYY-MM-DD)",
                 value="",
@@ -117,7 +103,6 @@ with tab_backtest:  # everything indented under this block renders inside the Ba
         ml_horizon = st.slider("ML horizon (candles ahead)", min_value=3, max_value=48, value=DEFAULT_ML_HORIZON, key="bt_horizon")
         run_button = st.button("Run fresh analysis", type="primary", key="bt_run")
 
-    # ── Run backtest on button click ──────────────────────────────────────────
     if run_button:
         with st.spinner("Fetching market data, training ML model, running backtest…"):
             df, result, ml_result = run_full_pipeline(
@@ -128,7 +113,7 @@ with tab_backtest:  # everything indented under this block renders inside the Ba
                 ml_horizon=ml_horizon,
             )
         st.success("Analysis complete.")
-        st.session_state["latest_metrics"] = {  # persist across reruns
+        st.session_state["latest_metrics"] = {
             "candles":             len(df),
             "final_balance":       result.final_balance,
             "max_drawdown":        result.max_drawdown,
@@ -143,7 +128,6 @@ with tab_backtest:  # everything indented under this block renders inside the Ba
     chart_path = Path("dashboard.png")
     metrics = st.session_state.get("latest_metrics", {})
 
-    # ── Five metric cards ────────────────────────────────────────────────────
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Candles", f"{int(metrics['candles']):,}" if metrics else "—")
     col2.metric(
@@ -159,7 +143,6 @@ with tab_backtest:  # everything indented under this block renders inside the Ba
         delta=f"baseline {metrics['baseline_accuracy']:.1%}" if metrics else None,
     )
 
-    # ── Buy-and-hold benchmark banner ────────────────────────────────────────
     if metrics:
         bnh = metrics["buy_and_hold_return"]
         strat_ret = metrics["final_balance"] / INITIAL_BALANCE - 1
@@ -171,7 +154,6 @@ with tab_backtest:  # everything indented under this block renders inside the Ba
             unsafe_allow_html=True,
         )
 
-    # ── Chart + trade log side by side ───────────────────────────────────────
     left, right = st.columns([2, 1])
     with left:
         st.subheader("Backtest Chart")
@@ -187,7 +169,6 @@ with tab_backtest:  # everything indented under this block renders inside the Ba
         else:
             st.dataframe(trade_log_df.tail(10), use_container_width=True)
 
-    # ── ML snapshot ──────────────────────────────────────────────────────────
     st.subheader("Machine Learning Snapshot")
     if ml_report_df.empty:
         st.info("ml_report.csv not found yet.")
@@ -200,11 +181,7 @@ with tab_backtest:  # everything indented under this block renders inside the Ba
             st.bar_chart(feature_section.set_index("name")["value"])
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — PAPER TRADE (NEW — live trading against Binance testnet)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-with tab_paper:  # everything indented under this block renders inside the Paper Trade tab
+with tab_paper:
     st.header("Paper Trading on Binance Testnet")
     st.caption(
         "Trade with **fake money on real-time prices** — perfect for validating the bot "
@@ -212,14 +189,10 @@ with tab_paper:  # everything indented under this block renders inside the Paper
         "[testnet.binance.vision](https://testnet.binance.vision/)."
     )
 
-    # ── Step 1 — Credentials ──────────────────────────────────────────────────
-    # Prefer environment variables; fall back to UI inputs stored in session_state.
-    # Session state means the keys persist during THIS browser session but are
-    # never written to disk by Streamlit.
     env_key    = os.environ.get("BINANCE_API_KEY", "").strip()
     env_secret = os.environ.get("BINANCE_API_SECRET", "").strip()
 
-    with st.expander("🔑 API credentials", expanded=(not env_key)):  # expander: collapsible box; open by default if creds missing
+    with st.expander("🔑 API credentials", expanded=(not env_key)):
         st.caption("Keys are stored only in this session's memory — never written to disk.")
         if env_key and env_secret:
             st.success("✓ Credentials loaded from environment variables (BINANCE_API_KEY / BINANCE_API_SECRET).")
@@ -229,7 +202,7 @@ with tab_paper:  # everything indented under this block renders inside the Paper
             api_key = st.text_input(
                 "API Key",
                 value=st.session_state.get("pt_api_key", ""),
-                type="password",  # type="password": characters shown as bullets
+                type="password",
                 key="pt_api_key_input",
             )
             api_secret = st.text_input(
@@ -238,40 +211,35 @@ with tab_paper:  # everything indented under this block renders inside the Paper
                 type="password",
                 key="pt_api_secret_input",
             )
-            # Persist across reruns in session_state (in-memory only)
             st.session_state["pt_api_key"] = api_key
             st.session_state["pt_api_secret"] = api_secret
 
-    # ── Step 2 — Connection status ────────────────────────────────────────────
     if not api_key or not api_secret:
         st.warning("⚠️ Enter your Binance testnet API key and secret above to enable paper trading.")
-        st.stop()  # st.stop(): halt rendering of the rest of this tab — user must complete setup first
+        st.stop()
 
-    # ── Try to connect and fetch balances ────────────────────────────────────
     try:
-        client = get_binance_client(api_key, api_secret, testnet=True)  # cached — only builds once per session
-        usdt_balance = client.get_balance("USDT")  # live query — returns current testnet USDT
-        btc_balance  = client.get_balance("BTC")   # live query — returns current testnet BTC
+        client = get_binance_client(api_key, api_secret, testnet=True)
+        usdt_balance = client.get_balance("USDT")
+        btc_balance  = client.get_balance("BTC")
         connected = True
-    except Exception as exc:  # any connection or auth error
+    except Exception as exc:
         st.error(f"❌ Connection failed: {exc}")
         st.caption("Check that your API keys are for the **testnet** (not mainnet) and are still valid.")
         connected = False
         usdt_balance = btc_balance = 0.0
 
     if not connected:
-        st.stop()  # cannot proceed without a working connection
+        st.stop()
 
-    # ── Step 3 — Fetch latest BTC price for portfolio valuation ──────────────
     try:
-        latest_kline = client.get_klines(symbol=DEFAULT_SYMBOL, interval=DEFAULT_INTERVAL, limit=1)  # get most recent hourly candle
-        current_price = float(latest_kline[-1][4])  # index [4] in a kline row is the close price
+        latest_kline = client.get_klines(symbol=DEFAULT_SYMBOL, interval=DEFAULT_INTERVAL, limit=1)
+        current_price = float(latest_kline[-1][4])
     except Exception:
         current_price = 0.0
 
-    portfolio_value = usdt_balance + btc_balance * current_price  # total account value in USD-equivalent
+    portfolio_value = usdt_balance + btc_balance * current_price
 
-    # ── Step 4 — Connection status + balance cards ───────────────────────────
     status_col, price_col = st.columns([1, 2])
     with status_col:
         st.success(f"✅ Connected to Binance **Testnet**")
@@ -283,11 +251,10 @@ with tab_paper:  # everything indented under this block renders inside the Paper
     c2.metric("BTC Balance", f"{btc_balance:.6f} BTC", delta=f"${btc_balance * current_price:,.2f}" if btc_balance > 0 else None)
     c3.metric("Portfolio Value", f"${portfolio_value:,.2f}")
 
-    # ── Step 5 — Current position status (from live_state.json) ──────────────
-    live_state = load_live_state()  # read the persisted state file written by live_trader.py
+    live_state = load_live_state()
     st.subheader("Current Position")
 
-    if live_state.get("in_trade", False):  # bot is currently holding BTC
+    if live_state.get("in_trade", False):
         pos_col1, pos_col2, pos_col3 = st.columns(3)
         entry_price = live_state.get("buy_price", 0.0)
         peak_price = live_state.get("peak_price", 0.0)
@@ -300,7 +267,6 @@ with tab_paper:  # everything indented under this block renders inside the Paper
     else:
         st.info("💰 **Status: In cash** — waiting for the next entry signal.")
 
-    # ── Step 6 — Action buttons ──────────────────────────────────────────────
     st.subheader("Actions")
     act_col1, act_col2, act_col3 = st.columns(3)
 
@@ -308,47 +274,43 @@ with tab_paper:  # everything indented under this block renders inside the Paper
         if st.button("🎯 Trade Once", type="primary", help="Run one decision cycle: check signal, place order if conditions are met"):
             with st.spinner("Fetching data, training model (if needed), checking signal…"):
                 try:
-                    model = get_trained_model()  # cached across reruns — retrains only on first call this session
+                    model = get_trained_model()
                     from quant_bot.live_trader import trade_once
                     new_state = trade_once(client, model)
                     st.success("Trade cycle complete — see updated status above.")
-                    st.rerun()  # st.rerun(): force the page to re-execute so balances/state refresh
+                    st.rerun()
                 except Exception as exc:
                     st.error(f"Trade cycle failed: {exc}")
 
     with act_col2:
         if st.button("🔄 Refresh Balances", help="Poll Binance for latest balances and price"):
-            # Clear cached balances so they get re-fetched — st.cache_resource caches the client, not the balance calls
             st.rerun()
 
     with act_col3:
         if st.button("🧹 Reset State File", help="Clear live_state.json (does NOT close any real position on Binance)"):
             p = Path(LIVE_STATE_PATH)
             if p.exists():
-                p.unlink()  # delete the state file
+                p.unlink()
                 st.success("State file cleared.")
                 st.rerun()
             else:
                 st.info("No state file to clear.")
 
-    # ── Step 7 — Trade history table ─────────────────────────────────────────
     st.subheader("Recent Trades")
-    history = live_state.get("trade_history", [])  # list of trade dicts written by live_trader.py
+    history = live_state.get("trade_history", [])
     if not history:
         st.info("No trades yet. Click **Trade Once** to check for a signal.")
     else:
-        trades_df = pd.DataFrame(history)  # convert list of dicts to a DataFrame
-        st.dataframe(trades_df.tail(20), use_container_width=True, hide_index=True)  # show last 20 trades
+        trades_df = pd.DataFrame(history)
+        st.dataframe(trades_df.tail(20), use_container_width=True, hide_index=True)
 
-        # ── Step 8 — Equity curve from trade history ─────────────────────────
         if len(trades_df) >= 2 and "pnl_usdt" in trades_df.columns:
             st.subheader("Equity Curve (from trade history)")
-            trades_df["cumulative_pnl"] = trades_df["pnl_usdt"].cumsum()  # cumsum(): running total of P&L
-            trades_df["equity"] = INITIAL_BALANCE + trades_df["cumulative_pnl"]  # starting balance + cumulative P&L
-            equity_series = trades_df.set_index("exit_time")["equity"]  # x-axis = exit_time, y-axis = equity
-            st.line_chart(equity_series)  # st.line_chart(): interactive line chart
+            trades_df["cumulative_pnl"] = trades_df["pnl_usdt"].cumsum()
+            trades_df["equity"] = INITIAL_BALANCE + trades_df["cumulative_pnl"]
+            equity_series = trades_df.set_index("exit_time")["equity"]
+            st.line_chart(equity_series)
 
-    # ── Step 9 — How to automate the hourly loop ─────────────────────────────
     with st.expander("⏰ How to automate hourly checks"):
         st.markdown(
             """
